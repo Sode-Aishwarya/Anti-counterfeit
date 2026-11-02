@@ -231,6 +231,13 @@ test("only the verified account role and assigned profile can prepare a lifecycl
 
 test("complete five-step lifecycle is persisted only after verified receipt and chain state", async () => {
   const h = harness();
+  const expectedCustodians = {
+    DISPATCH_TO_DISTRIBUTOR: accounts.mfr,
+    RECEIVE_BY_DISTRIBUTOR: accounts.dist,
+    DISPATCH_TO_RETAILER: accounts.dist,
+    RECEIVE_BY_RETAILER: accounts.retail,
+    RECORD_SALE: accounts.retail
+  };
   for (const [action, [previousState, newState]] of Object.entries(transitions)) {
     const userId = ACTOR_FOR_ACTION[action];
     const role = userId.toUpperCase();
@@ -241,6 +248,8 @@ test("complete five-step lifecycle is persisted only after verified receipt and 
     const done = await confirmLifecycleAction({ userId, role, operationId: op.operationId, transactionHash: `0x${String(newState).padStart(64, "0")}` }, h.deps);
     assert.equal(done.status, "CONFIRMED");
     assert.equal(done.newState, newState);
+    assert.equal(h.chainProduct.currentCustodian, expectedCustodians[action], `${action} custodian`);
+    assert.equal(h.chainProduct.state, newState, `${action} resulting state`);
   }
   assert.equal(h.operations.length, 5);
   assert.equal(h.chainProduct.state, 5);

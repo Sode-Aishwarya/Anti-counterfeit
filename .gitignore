@@ -29,3 +29,21 @@ __pycache__/
 venv/
 # Frontend production build
 frontend/dist/
+
+# Temporary test artifacts
+.test-run-tmp/
+**/.test-run-tmp/
+
+# Python testing and tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local development environments
+.python-version.local
+
+# Editor / operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

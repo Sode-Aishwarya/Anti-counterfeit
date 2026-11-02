@@ -280,6 +280,7 @@ const runImageVerification = async ({
     storedProduct: storedProductOverride,
     aiResponse,
     aiThrows = false,
+    chainThrows = false,
     uploadedBytes = makePngBuffer("default-upload"),
     extraProductProps = {}
 } = {}) => {
@@ -334,10 +335,13 @@ const runImageVerification = async ({
         });
         Product.findOne = () => ({ lean: async () => storedProduct });
         Verification.create = async (record) => { savedVerification = record; return record; };
-        blockchainServiceMod.verifyProductOnBlockchain = async () => ({
+        blockchainServiceMod.verifyProductOnBlockchain = async () => {
+            if (chainThrows) throw new Error("RPC unavailable");
+            return ({
             exists: true, isActive: true, isFlagged: false,
             product: { productId: pCode, productHash: pHash }
-        });
+            });
+        };
 
         delete require.cache[controllerPath];
         const controller = require(controllerPath);
@@ -369,6 +373,23 @@ const runImageVerification = async ({
         delete require.cache[controllerPath];
     }
 };
+
+test("image verification reports UNAVAILABLE and never GENUINE when registry RPC fails", async () => {
+    const { responseBody, statusCode, savedVerification } = await runImageVerification({
+        chainThrows: true,
+        extraProductProps: {
+            category: "Medicine",
+            imageHash: crypto.createHash("sha256").update(makePngBuffer("rpc-failure")).digest("hex")
+        },
+        uploadedBytes: makePngBuffer("rpc-failure"),
+        aiResponse: { prediction: "genuine", confidence: 0.99 }
+    });
+    assert.equal(statusCode, 503);
+    assert.equal(responseBody.verified, false);
+    assert.equal(responseBody.status, "UNAVAILABLE");
+    assert.equal(responseBody.authenticityStatus, "UNAVAILABLE");
+    assert.equal(savedVerification, undefined);
+});
 
 // ---- Watch image vs tablet product ----
 

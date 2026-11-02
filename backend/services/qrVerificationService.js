@@ -94,7 +94,9 @@ const verifySavedProduct = async ({ productCode, qrPayload, allowCodeOnly = fals
     }
 
     const storedProduct = await lookupProduct(deps.Product, routeCode);
-    if (!storedProduct) return failure("NOT_REGISTERED", "Product has no saved application registration.");
+    // A missing database row cannot prove that a chain product does not exist.
+    // Without saved provenance there is no safe V1/V2 registry to select.
+    if (!storedProduct) return failure("UNVERIFIED", "Product registry identity is unavailable; authenticity could not be established.");
     const registration = await lookupCompletedRegistration(deps.ProductRegistration, storedProduct);
     const identity = resolveProductRegistryIdentity({
         product: storedProduct,
@@ -111,17 +113,22 @@ const verifySavedProduct = async ({ productCode, qrPayload, allowCodeOnly = fals
     if (!expectedChainId || identity.chainId !== expectedChainId) {
         return failure("REGISTRY_UNAVAILABLE", "The saved product registry is on a different or unsupported chain.");
     }
-    const chainResult = await selectedBlockchain.verifyProductOnBlockchain(
-        routeCode,
-        { registryAddress: identity.address }
-    );
+    let chainResult;
+    try {
+        chainResult = await selectedBlockchain.verifyProductOnBlockchain(
+            routeCode,
+            { registryAddress: identity.address }
+        );
+    } catch {
+        return failure("UNAVAILABLE", "Blockchain verification is temporarily unavailable.");
+    }
 
     if (!chainResult?.exists && !storedProduct) {
         return failure("NOT_REGISTERED", "Product is not registered.", { checked: true });
     }
 
     if (!chainResult?.exists) {
-        return failure("INVALID_QR", "Product database and blockchain records do not agree.", { checked: true });
+        return failure("UNVERIFIED", "Product database and blockchain records do not agree.", { checked: true });
     }
 
     if (chainResult.isFlagged) {

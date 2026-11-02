@@ -33,9 +33,27 @@ function LifecycleWorkflow({ role, compact = false }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busyCode, setBusyCode] = useState("");
+  const [productView, setProductView] = useState("ALL");
   const user = useMemo(() => readUser(), []);
   const token = localStorage.getItem("token");
   const pendingStorageKey = `lifecyclePending:${user.id || "unbound"}`;
+  const incomingState = role === "DISTRIBUTOR"
+    ? "DISPATCHED_TO_DISTRIBUTOR"
+    : role === "RETAILER" ? "DISPATCHED_TO_RETAILER" : null;
+  const heldStates = role === "DISTRIBUTOR"
+    ? new Set(["RECEIVED_BY_DISTRIBUTOR", "DISPATCHED_TO_RETAILER"])
+    : role === "RETAILER" ? new Set(["RECEIVED_BY_RETAILER"]) : new Set(["MINTED", "DISPATCHED_TO_DISTRIBUTOR"]);
+  const isHeldByAccount = (entry) => entry.chainStatus === "AVAILABLE" &&
+    heldStates.has(entry.lifecycleState) &&
+    Boolean(user.walletAddress) &&
+    String(entry.currentCustodian || "").toLowerCase() === String(user.walletAddress).toLowerCase();
+  const isIncoming = (entry) => entry.chainStatus === "AVAILABLE" && entry.lifecycleState === incomingState;
+  const incomingCount = incomingState ? entries.filter(isIncoming).length : 0;
+  const inventoryCount = entries.filter(isHeldByAccount).length;
+  const unavailableCount = entries.filter((entry) => entry.chainStatus !== "AVAILABLE").length;
+  const visibleEntries = entries.filter((entry) => productView === "ALL" ||
+    (productView === "INCOMING" && isIncoming(entry)) ||
+    (productView === "INVENTORY" && isHeldByAccount(entry)));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -139,6 +157,17 @@ function LifecycleWorkflow({ role, compact = false }) {
       setBusyCode("");
       await load();
     }
+  };
+
+  const openProductQr = (product) => {
+    const payload = encodeURIComponent(JSON.stringify({
+      productCode: product.productCode,
+      productName: product.productName,
+      brandName: product.brandName,
+      category: product.category,
+      productHash: product.productHash
+    }));
+    window.open(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${payload}`, "_blank", "noopener,noreferrer");
   };
 
   const runAction = async (entry) => {
@@ -259,8 +288,21 @@ function LifecycleWorkflow({ role, compact = false }) {
           <span>This view uses saved product assignments and configured registry reads; it does not show sample products.</span>
         </div>
       ) : (
-        <div className="lifecycle-list">
-          {entries.map((entry) => {
+        <>
+        <div className="partner-lifecycle-metrics" aria-label="Lifecycle summary">
+          <article><span>{role === "DISTRIBUTOR" ? "Incoming from manufacturers" : role === "RETAILER" ? "Incoming from distributors" : "Awaiting dispatch"}</span><strong>{role === "MANUFACTURER" ? entries.filter((entry) => entry.chainStatus === "AVAILABLE" && entry.lifecycleState === "MINTED").length : incomingCount}</strong></article>
+          <article><span>{role === "DISTRIBUTOR" ? "Distributor inventory" : role === "RETAILER" ? "Retail inventory" : "Products in custody"}</span><strong>{inventoryCount}</strong></article>
+          <article><span>Not live V2-confirmed</span><strong>{unavailableCount}</strong></article>
+        </div>
+        {role !== "MANUFACTURER" && <div className="lifecycle-view-tabs" aria-label="Filter assigned products">
+          {[["ALL", "All assigned"], ["INCOMING", "Incoming"], ["INVENTORY", "Inventory"]].map(([value, label]) => (
+            <button key={value} type="button" className={productView === value ? "active" : ""} aria-pressed={productView === value} onClick={() => setProductView(value)}>{label}</button>
+          ))}
+        </div>}
+        {visibleEntries.length === 0 ? (
+          <div className="lifecycle-state lifecycle-empty"><strong>No products in this view.</strong><span>Only saved assignments with a matching live V2 state appear in incoming and inventory views.</span></div>
+        ) : <div className="lifecycle-list">
+          {visibleEntries.map((entry) => {
             const product = entry.product;
             const action = stateActions[role]?.[entry.lifecycleState];
             const serverPending = pendingActions.find((item) => item.productCode === product.productCode);
@@ -277,17 +319,19 @@ function LifecycleWorkflow({ role, compact = false }) {
                 <div className="lifecycle-product-copy">
                   <span className="lifecycle-code">{product.productCode}</span>
                   <h3>{product.productName}</h3>
-                  <p>{product.brandName || "Brand not recorded"} · {product.category || "Category not recorded"}</p>
-                  {product.transactionHash && <small>Mint reference: {product.transactionHash.slice(0, 10)}…{product.transactionHash.slice(-8)}</small>}
+                  <p>{product.brandName || "Brand not recorded"} · {product.category || "Category not recorded"}{product.batchNumber ? ` · Batch ${product.batchNumber}` : ""}</p>
+                  {product.manufacturingDate && <small>Manufactured {new Date(product.manufacturingDate).toLocaleDateString()}</small>}
+                  {product.transactionHash && <a className="lifecycle-tx-link" href={`https://sepolia.etherscan.io/tx/${encodeURIComponent(product.transactionHash)}`} target="_blank" rel="noreferrer">View mint transaction ↗</a>}
                 </div>
                 <div className="lifecycle-product-state">
                   {entry.chainStatus === "AVAILABLE" ? (
-                    <><span className="lifecycle-status">{entry.lifecycleState}</span><small>Current custodian {entry.currentCustodian ? `${entry.currentCustodian.slice(0, 8)}…${entry.currentCustodian.slice(-6)}` : "not available"}</small></>
+                    <><small className="lifecycle-live-label">LIVE V2 STATE</small><span className="lifecycle-status">{entry.lifecycleState}</span><small>Current custodian {entry.currentCustodian ? `${entry.currentCustodian.slice(0, 8)}…${entry.currentCustodian.slice(-6)}` : "not available"}</small></>
                   ) : (
-                    <><span className="lifecycle-status lifecycle-status-muted">{entry.chainStatus === "LEGACY" ? "Legacy registry" : entry.chainStatus}</span><small>{entry.chainStatus === "LEGACY" ? "Custody actions are not available for this V1 record." : entry.chainStatus === "REGISTRY_UNRESOLVED" ? "Saved registry provenance is incomplete; no chain was selected." : "Chain state could not be confirmed."}</small></>
+                    <><span className="lifecycle-status lifecycle-status-muted">{entry.chainStatus === "LEGACY" ? "Legacy registry" : entry.chainStatus}</span><small>{entry.chainStatus === "LEGACY" ? "Custody actions are not available for this V1 record." : entry.chainStatus === "REGISTRY_UNRESOLVED" ? "Saved registry provenance is incomplete; no chain was selected." : entry.chainStatus === "UNVERIFIED" ? "Product identity does not match the live V2 record; actions are disabled." : "Chain state could not be confirmed."}</small></>
                   )}
                 </div>
                 <div className="lifecycle-product-action">
+                  {role === "RETAILER" && entry.chainStatus === "AVAILABLE" && <button type="button" className="secondary-button lifecycle-qr-button" onClick={() => openProductQr(product)}>Open product QR</button>}
                   {showRecoveryForm ? (
                     <form className="lifecycle-recovery" onSubmit={(event) => { event.preventDefault(); recoverSubmittedHash(entry); }}>
                       <label htmlFor={`lifecycle-hash-${product.productCode}`}>{legacyRevertedRecovery ? "Check another already-submitted transaction" : "Reconcile submitted transaction"}</label>
@@ -319,7 +363,8 @@ function LifecycleWorkflow({ role, compact = false }) {
               </article>
             );
           })}
-        </div>
+        </div>}
+        </>
       )}
       {role === "RETAILER" && <p className="lifecycle-sale-note">“Record retailer-reported sale” is an explicit retailer attestation; QR verification never changes the product state.</p>}
     </section>

@@ -382,9 +382,12 @@ const verifyProductByQR = async (req, res) => {
             }
         });
     } catch (error) {
-        return res.status(error.statusCode || 500).json({
+        const unavailable = !error.statusCode;
+        return res.status(error.statusCode || 503).json({
             verified: false,
-            message: error.statusCode ? error.message : "Server error during QR verification"
+            status: unavailable ? "UNAVAILABLE" : "INVALID_REQUEST",
+            authenticityStatus: unavailable ? "UNAVAILABLE" : "INVALID_REQUEST",
+            message: error.statusCode ? error.message : "Blockchain verification is temporarily unavailable."
         });
     }
 };
@@ -433,10 +436,12 @@ const verifyProductByCode = async (req, res) => {
             scanBehavior: { scoringStatus: verification.scoringStatus || "NOT_APPLICABLE" }
         });
     } catch (error) {
-        return res.status(error.statusCode || 500).json({
+        const unavailable = !error.statusCode;
+        return res.status(error.statusCode || 503).json({
             verified: false,
             verificationMethod: "MANUAL_CODE",
-            status: error.statusCode ? "INVALID_REQUEST" : "VERIFICATION_UNAVAILABLE",
+            status: error.statusCode ? "INVALID_REQUEST" : "UNAVAILABLE",
+            authenticityStatus: unavailable ? "UNAVAILABLE" : "INVALID_REQUEST",
             message: error.statusCode ? error.message : "Product code verification is temporarily unavailable."
         });
     }
@@ -489,7 +494,7 @@ const verifyProductImage = async (req, res) => {
 
         const storedProduct = await Product.findOne({ productCode }).lean();
         if (!storedProduct) {
-            return res.status(404).json({ verified: false, status: "NOT_REGISTERED", message: "Product has no saved application registration" });
+            return res.status(200).json({ verified: false, status: "UNVERIFIED", authenticityStatus: "UNVERIFIED", message: "Saved registry identity is unavailable; product authenticity could not be established." });
         }
         const registration = storedProduct.transactionHash
             ? await ProductRegistration.findOne({
@@ -519,9 +524,20 @@ const verifyProductImage = async (req, res) => {
                 message: "The saved product registry is on a different or unsupported chain."
             });
         }
-        const blockchainResult = await selectedBlockchain.verifyProductOnBlockchain(productCode, {
-            registryAddress: registryIdentity.address
-        });
+        let blockchainResult;
+        try {
+            blockchainResult = await selectedBlockchain.verifyProductOnBlockchain(productCode, {
+                registryAddress: registryIdentity.address
+            });
+        } catch {
+            return res.status(503).json({
+                verified: false,
+                status: "UNAVAILABLE",
+                authenticityStatus: "UNAVAILABLE",
+                blockchainVerified: false,
+                message: "Blockchain verification is temporarily unavailable."
+            });
+        }
         const chainProduct = blockchainResult.product;
 
 
@@ -730,9 +746,13 @@ const verifyProductImage = async (req, res) => {
         );
 
 
-        return res.status(500).json({
+        return res.status(error.statusCode || 500).json({
 
             verified: false,
+
+            status: error.statusCode ? "INVALID_REQUEST" : "UNAVAILABLE",
+
+            authenticityStatus: error.statusCode ? "INVALID_REQUEST" : "UNAVAILABLE",
 
             message:
                 "Server error during image verification"

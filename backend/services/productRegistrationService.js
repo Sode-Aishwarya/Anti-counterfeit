@@ -11,6 +11,7 @@ const SupplyChainPartner = require("../models/SupplyChainPartner");
 const Verification = require("../models/Verification");
 const blockchain = require("./blockchainService");
 const blockchainV2 = require("./blockchainV2Service");
+const { resolveProductRegistryIdentity } = require("./productRegistryIdentity");
 const {
     PARTNER_DIAGNOSTIC_STAGES,
     withPartnerDiagnosticStage,
@@ -676,6 +677,7 @@ const confirmProductRegistration = async ({
         chainProduct.productHash !== productHash ||
         chainProduct.ipfsImageHash !== registration.ipfsImageHash ||
         chainProduct.manufacturerId !== manufacturerId ||
+        (registryVersion === 2 && (!chainProduct.manufacturer || !addressMatches(chainProduct.manufacturer, walletAddress))) ||
         !addressMatches(chainProduct.authorizedDistributor, distributor.walletAddress) ||
         !addressMatches(chainProduct.authorizedRetailer, retailer.walletAddress)
     ) {
@@ -986,8 +988,50 @@ const getApprovedPartners = async (type, overrides = {}, onDiagnostic) => {
     }
 };
 
-const addVerificationMetrics = async (products, VerificationModel) => {
+const verifyListedProduct = async (product, deps) => {
+    const registrationQuery = product?.transactionHash
+        ? deps.ProductRegistration.findOne({
+            productCode: product.productCode,
+            transactionHash: product.transactionHash,
+            status: "COMPLETE"
+        })
+        : null;
+    const registration = registrationQuery
+        ? await (registrationQuery.lean ? registrationQuery.lean() : registrationQuery)
+        : null;
+    const identity = resolveProductRegistryIdentity({
+        product,
+        registration,
+        blockchainV1: deps.blockchain,
+        blockchainV2: deps.blockchainV2
+    });
+    if (identity.status !== "RESOLVED") return "REGISTRY_UNRESOLVED";
+
+    const chain = identity.version === 2 ? deps.blockchainV2 : deps.blockchain;
+    if (identity.chainId !== Number(chain.SEPOLIA_CHAIN_ID || chain.CHAIN_ID || 0)) return "UNAVAILABLE";
+    try {
+        const result = await chain.verifyProductOnBlockchain(product.productCode, { registryAddress: identity.address });
+        const chainProduct = result?.product;
+        const manufacturerId = String(product.manufacturerId?._id || product.manufacturerId || "");
+        if (!result?.exists || !chainProduct || chainProduct.productId !== product.productCode ||
+            chainProduct.productHash !== product.productHash || String(chainProduct.manufacturerId) !== manufacturerId) {
+            return "UNVERIFIED";
+        }
+        if (identity.version === 2 && (!chainProduct.manufacturer ||
+            String(chainProduct.manufacturer).toLowerCase() !== String(product.manufacturerWallet || "").toLowerCase())) {
+            return "UNVERIFIED";
+        }
+        if (result.isFlagged) return "FLAGGED";
+        if (!result.isActive) return "DEACTIVATED";
+        return "REGISTERED";
+    } catch {
+        return "UNAVAILABLE";
+    }
+};
+
+const addVerificationMetrics = async (products, deps) => {
     if (!products.length) return [];
+    const VerificationModel = deps.Verification;
 
     const groups = await VerificationModel.aggregate([
         {
@@ -1049,13 +1093,16 @@ const addVerificationMetrics = async (products, VerificationModel) => {
         }
     }
 
-    return products.map((product) => ({
-        ...product,
-        // This is a database registration state, not an authenticity decision.
-        status: "REGISTERED",
-        ...metricsByProduct.get(product.productCode),
-        // Retain the old property for existing consumers; it counts all verification records.
-        totalScans: metricsByProduct.get(product.productCode).totalVerifications
+    return Promise.all(products.map(async (product) => {
+        const status = await verifyListedProduct(product, deps);
+        return {
+            ...product,
+            status,
+            registrationStatus: status,
+            ...metricsByProduct.get(product.productCode),
+            // Retain the old property for existing consumers; it counts all verification records.
+            totalScans: metricsByProduct.get(product.productCode).totalVerifications
+        };
     }));
 };
 
@@ -1069,7 +1116,7 @@ const listManufacturerProducts = async (userId, overrides = {}) => {
     const products = await deps.Product.find({ manufacturerId: manufacturer._id })
         .sort({ createdAt: -1 })
         .lean();
-    return addVerificationMetrics(products, deps.Verification);
+    return addVerificationMetrics(products, deps);
 };
 
 const listAllProducts = async (overrides = {}) => {
@@ -1079,7 +1126,7 @@ const listAllProducts = async (overrides = {}) => {
         .sort({ createdAt: -1 })
         .lean();
 
-    const enriched = await addVerificationMetrics(products, deps.Verification);
+    const enriched = await addVerificationMetrics(products, deps);
     return enriched.map((product) => ({
         ...product,
         manufacturer: product.manufacturerId?.companyName || "Unknown",
@@ -1099,7 +1146,7 @@ const listAllProductsPaginated = async ({ page = 1, pageSize = 20 } = {}, overri
         .limit(pageSize)
         .lean();
 
-    const enriched = await addVerificationMetrics(products, deps.Verification);
+    const enriched = await addVerificationMetrics(products, deps);
     return {
         products: enriched.map((product) => ({
             ...product,

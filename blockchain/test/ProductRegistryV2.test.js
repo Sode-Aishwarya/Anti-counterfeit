@@ -125,6 +125,10 @@ async function assertLifecycleEvent(tx, { actor, counterparty, previousState, ne
     await assertLifecycleEvent(registry.connect(distributor).dispatchToRetailer(productId), {
       actor: distributor.address, counterparty: retailer.address, previousState: 2, newState: 3, custodian: distributor.address
     });
+    product = await registry.getProduct(productId);
+    expect(product.state).to.equal(3);
+    // Dispatch records the handoff; custody changes only when the assigned receiver accepts it.
+    expect(product.currentCustodian).to.equal(distributor.address);
     await assertLifecycleEvent(registry.connect(retailer).receiveByRetailer(productId), {
       actor: retailer.address, counterparty: distributor.address, previousState: 3, newState: 4, custodian: retailer.address
     });
@@ -146,6 +150,19 @@ async function assertLifecycleEvent(tx, { actor, counterparty, previousState, ne
     await registry.approveRole(anotherRetailer.address);
     await expect(registry.connect(anotherRetailer).receiveByRetailer(productId))
       .to.be.revertedWith("Not authorized retailer");
+  });
+
+  it("rejects a different distributor role from dispatching the assigned product to retail", async function () {
+    await mint();
+    await registry.connect(other).requestRole(2, "Other distributor");
+    await registry.approveRole(other.address);
+    await registry.connect(manufacturer).dispatchToDistributor(productId);
+    await registry.connect(distributor).receiveByDistributor(productId);
+    await expect(registry.connect(other).dispatchToRetailer(productId))
+      .to.be.revertedWith("Not authorized distributor");
+    const product = await registry.getProduct(productId);
+    expect(product.state).to.equal(2);
+    expect(product.currentCustodian).to.equal(distributor.address);
   });
 
   it("permits only the assigned retailer to record sale after receipt", async function () {

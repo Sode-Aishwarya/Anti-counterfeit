@@ -13,7 +13,8 @@ const adminDashboard = readFileSync(
 );
 
 test("manufacturer product views label registration separately from authenticity", () => {
-  assert.match(manufacturerDashboard, /status === "REGISTERED" \? "Registered"/);
+  assert.match(manufacturerDashboard, /status === "REGISTERED" \? "Verified on chain"/);
+  assert.match(manufacturerDashboard, /product\.status \|\| "UNVERIFIED"/);
   assert.match(manufacturerDashboard, /This lookup does not verify authenticity/);
   assert.doesNotMatch(manufacturerDashboard, /✓ Genuine/);
   assert.doesNotMatch(manufacturerDashboard, /product\.genuineScans|product\.counterfeitScans/);

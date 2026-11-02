@@ -31,7 +31,7 @@ const run = async ({ storedProduct = product, chainResult = {
     isActive: true,
     isFlagged: false,
     product: { productId: product.productCode, productHash: hash }
-}, code = product.productCode, qrPayload = payload() } = {}) => {
+}, code = product.productCode, qrPayload = payload(), chainError = null, verifyMethod = "verifyQrProduct" } = {}) => {
     const calls = { db: 0, chain: 0, mutating: 0 };
     const model = {
         findOne(query) {
@@ -50,14 +50,18 @@ const run = async ({ storedProduct = product, chainResult = {
         async verifyProductOnBlockchain(requestedCode) {
             calls.chain += 1;
             assert.equal(requestedCode, code);
+            if (chainError) throw chainError;
             return chainResult;
         },
         async verifyProduct() { calls.mutating += 1; }
     };
-    const result = await qrVerificationService.verifyQrProduct({ productCode: code, qrPayload }, {
+    const overrides = {
         Product: model,
         blockchainService: chain
-    });
+    };
+    const result = verifyMethod === "verifyProductCode"
+        ? await qrVerificationService.verifyProductCode({ productCode: code }, overrides)
+        : await qrVerificationService.verifyQrProduct({ productCode: code, qrPayload }, overrides);
     return { result, calls };
 };
 
@@ -96,19 +100,32 @@ test("legacy structured QR without a hash remains valid after record comparison"
     assert.equal(result.verified, true);
 });
 
-test("missing Mongo and blockchain records are not registered", async () => {
+test("missing Mongo registry provenance is unverified rather than inferred from database absence", async () => {
     const { result } = await run({
         storedProduct: null,
         chainResult: { exists: false, isActive: false, isFlagged: false, product: null }
     });
     assert.equal(result.verified, false);
-    assert.equal(result.status, "NOT_REGISTERED");
+    assert.equal(result.status, "UNVERIFIED");
 });
 
 test("a blockchain record without its Mongo record is not genuine", async () => {
     const { result } = await run({ storedProduct: null });
     assert.equal(result.verified, false);
-    assert.equal(result.status, "NOT_REGISTERED");
+    assert.equal(result.status, "UNVERIFIED");
+});
+
+test("RPC failure produces an explicit unavailable result and never genuine", async () => {
+    const { result } = await run({ chainError: new Error("RPC timeout") });
+    assert.equal(result.verified, false);
+    assert.equal(result.status, "UNAVAILABLE");
+    assert.equal(result.blockchain.checked, false);
+});
+
+test("manual-code RPC failure is unavailable and never genuine", async () => {
+    const { result } = await run({ chainError: new Error("RPC timeout"), verifyMethod: "verifyProductCode" });
+    assert.equal(result.verified, false);
+    assert.equal(result.status, "UNAVAILABLE");
 });
 
 test("database and blockchain product hash mismatch is rejected", async () => {

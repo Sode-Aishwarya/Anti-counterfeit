@@ -1835,7 +1835,7 @@ function AdminDashboard({ onLogout }) {
                           <span
   className="status registered"
 >
-  {product.status === "REGISTERED" ? "Registered in MongoDB" : "Status unavailable"}
+  {product.status === "REGISTERED" ? "Verified on chain" : product.status || "UNVERIFIED"}
 </span>
 
                         </td>

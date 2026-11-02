@@ -587,7 +587,15 @@ const listAssignedProducts = async ({ userId, role, page = 1, pageSize = 20 }, o
         }
         try {
             const current = await deps.blockchainV2.getProduct(product.productCode, { registryAddress: identity.address });
-            return { product, chainStatus: current ? "AVAILABLE" : "NOT_FOUND", lifecycleState: current ? STATE_LABELS[current.state] : null, currentCustodian: current?.currentCustodian || null };
+            if (!current) return { product, chainStatus: "NOT_FOUND", lifecycleState: null, currentCustodian: null };
+            try {
+                validateProductIdentity(product, current);
+            } catch {
+                return { product, chainStatus: "UNVERIFIED", lifecycleState: null, currentCustodian: null };
+            }
+            const lifecycleState = STATE_LABELS[current.state];
+            if (!lifecycleState) return { product, chainStatus: "UNVERIFIED", lifecycleState: null, currentCustodian: null };
+            return { product, chainStatus: "AVAILABLE", lifecycleState, currentCustodian: current.currentCustodian || null };
         } catch {
             return { product, chainStatus: "UNAVAILABLE", lifecycleState: null, currentCustodian: null };
         }

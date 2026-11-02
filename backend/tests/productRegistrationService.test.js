@@ -223,6 +223,7 @@ const createHarness = (overrides = {}) => {
             getMintEvent: (_receipt, code) => ({
                 productId: code,
                 manufacturerId: preparedArgs.manufacturerId,
+                manufacturer: MANUFACTURER_WALLET,
                 productHash: preparedArgs.productHash,
                 ipfsImageHash: "",
                 timestamp: 1777593600
@@ -547,6 +548,29 @@ test("confirmation validates the saved transaction and persists its product", as
     assert.equal(harness.registrations[0].transactionHash, transactionHash);
 });
 
+test("a V2 on-chain manufacturer mismatch blocks MongoDB product creation", async () => {
+    const harness = createHarness();
+    const { deps, prepared } = await prepareForConfirmation(harness);
+    harness.registrations[0].registryVersion = 2;
+    harness.registrations[0].preparedTransaction.registryVersion = 2;
+    deps.blockchain.getProductFromBlockchain = async (code) => ({
+        productId: code,
+        manufacturerId: harness.preparedArgs.manufacturerId,
+        manufacturer: RETAILER_WALLET,
+        productHash: harness.preparedArgs.productHash,
+        ipfsImageHash: "",
+        mintedAt: 1777593600,
+        authorizedDistributor: DISTRIBUTOR_WALLET,
+        authorizedRetailer: RETAILER_WALLET
+    });
+    await assert.rejects(confirmProductRegistration({
+        userId: "manufacturer-user-id",
+        registrationId: prepared.registrationId,
+        transactionHash: `0x${"a".repeat(64)}`
+    }, deps), /on-chain product record does not match/);
+    assert.equal(harness.createdProducts.length, 0);
+});
+
 test("reverted and mismatched transactions do not persist products", async () => {
     const reverted = createHarness({
         blockchain: { waitForMintTransaction: async () => ({ receipt: { status: 0 }, transaction: {} }) }
@@ -800,7 +824,14 @@ test("pending registration listing is scoped to its manufacturer", async () => {
 
 test("manufacturer product listing is scoped to the database profile", async () => {
     let requestedFilter;
-    const products = [{ productCode: "FPD0001" }];
+    const products = [{
+        productCode: "FPD0001",
+        productHash: "a".repeat(64),
+        manufacturerId: "manufacturer-profile-id",
+        registryVersion: 1,
+        registryAddress: CONTRACT_ADDRESS,
+        chainId: 11155111
+    }];
     const harness = createHarness({
         Manufacturer: { findOne: async () => ({ _id: "manufacturer-profile-id" }) },
         Product: {
@@ -819,6 +850,12 @@ test("manufacturer product listing is scoped to the database profile", async () 
                     { _id: { productCode: "FPD0001", verificationType: "IMAGE", status: "GENUINE", scoringStatus: "NOT_APPLICABLE" }, count: 1 }
                 ];
             }
+        },
+        blockchain: {
+            verifyProductOnBlockchain: async () => ({
+                exists: true, isActive: true, isFlagged: false,
+                product: { productId: "FPD0001", productHash: "a".repeat(64), manufacturerId: "manufacturer-profile-id" }
+            })
         }
     });
     const result = await listManufacturerProducts("manufacturer-user-id", harness.deps);
@@ -846,6 +883,49 @@ test("manufacturer product listing is scoped to the database profile", async () 
     assert.equal(Object.hasOwn(result[0], "counterfeitScans"), false);
 });
 
+test("Mongo product rows are never listed as registered when registry identity is unresolved or RPC is unavailable", async (t) => {
+    const product = {
+        productCode: "FPD-UNVERIFIED",
+        productHash: "a".repeat(64),
+        manufacturerId: "manufacturer-profile-id",
+        registryVersion: 1,
+        registryAddress: CONTRACT_ADDRESS,
+        chainId: 11155111
+    };
+    const makeHarness = (blockchain, savedProduct = product) => createHarness({
+        Manufacturer: { findOne: async () => ({ _id: "manufacturer-profile-id" }) },
+        Product: { find: () => ({ sort: () => ({ lean: async () => [savedProduct] }) }) },
+        Verification: { aggregate: async () => [] },
+        blockchain: {
+            SEPOLIA_CHAIN_ID: 11155111,
+            CONTRACT_ADDRESS,
+            ...blockchain
+        }
+    });
+
+    await t.test("RPC failure", async () => {
+        const result = await listManufacturerProducts("manufacturer-user-id", makeHarness({
+            verifyProductOnBlockchain: async () => { throw new Error("RPC unavailable"); }
+        }).deps);
+        assert.equal(result[0].status, "UNAVAILABLE");
+        assert.notEqual(result[0].status, "REGISTERED");
+    });
+
+    await t.test("on-chain record mismatch", async () => {
+        const result = await listManufacturerProducts("manufacturer-user-id", makeHarness({
+            verifyProductOnBlockchain: async () => ({ exists: false, product: null })
+        }).deps);
+        assert.equal(result[0].status, "UNVERIFIED");
+    });
+
+    await t.test("missing registry identity", async () => {
+        const result = await listManufacturerProducts("manufacturer-user-id", makeHarness({
+            verifyProductOnBlockchain: async () => { throw new Error("must not guess a registry"); }
+        }, { productCode: product.productCode, productHash: product.productHash, manufacturerId: product.manufacturerId }).deps);
+        assert.equal(result[0].status, "REGISTRY_UNRESOLVED");
+    });
+});
+
 test("admin product listing reads MongoDB and joins manufacturer and scan data", async () => {
     const mintedAt = new Date("2026-10-01T00:00:00.000Z");
     const harness = createHarness({
@@ -855,7 +935,11 @@ test("admin product listing reads MongoDB and joins manufacturer and scan data",
                     sort: () => ({
                         lean: async () => [{
                             productCode: "FPD0001",
+                            productHash: "a".repeat(64),
                             manufacturerId: { _id: "manufacturer-profile-id", companyName: "Acme" },
+                            registryVersion: 1,
+                            registryAddress: CONTRACT_ADDRESS,
+                            chainId: 11155111,
                             mintedAt
                         }]
                     })
@@ -866,6 +950,9 @@ test("admin product listing reads MongoDB and joins manufacturer and scan data",
             aggregate: async () => [
                 { _id: { productCode: "FPD0001", verificationType: "QR", status: "GENUINE", scoringStatus: "INSUFFICIENT_DATA" }, count: 3 }
             ]
+        },
+        blockchain: {
+            verifyProductOnBlockchain: async () => ({ exists: false, product: null })
         }
     });
     const products = await listAllProducts(harness.deps);
@@ -874,6 +961,7 @@ test("admin product listing reads MongoDB and joins manufacturer and scan data",
     assert.equal(products[0].totalScans, 3);
     assert.equal(products[0].qrScans, 3);
     assert.equal(products[0].imageVerifications, 0);
+    assert.equal(products[0].status, "UNVERIFIED");
     assert.equal(products[0].timestamp, mintedAt.toISOString());
 });
 
@@ -892,7 +980,7 @@ test("admin product pagination applies server-side skip and limit and enriches o
                                 return {
                                     limit: (limit) => {
                                         calls.limit = limit;
-                                        return { lean: async () => [{ productCode: "FPD0021", manufacturerId: { _id: "m1", companyName: "Acme" } }] };
+                                        return { lean: async () => [{ productCode: "FPD0021", productHash: "a".repeat(64), manufacturerId: { _id: "m1", companyName: "Acme" }, registryVersion: 1, registryAddress: CONTRACT_ADDRESS, chainId: 11155111 }] };
                                     }
                                 };
                             }
@@ -903,7 +991,8 @@ test("admin product pagination applies server-side skip and limit and enriches o
         },
         Verification: {
             aggregate: async () => []
-        }
+        },
+        blockchain: { verifyProductOnBlockchain: async () => ({ exists: false, product: null }) }
     });
     const result = await listAllProductsPaginated({ page: 3, pageSize: 10 }, harness.deps);
     assert.equal(calls.skip, 20);
@@ -911,5 +1000,6 @@ test("admin product pagination applies server-side skip and limit and enriches o
     assert.deepEqual(result.pagination, { page: 3, pageSize: 10, total: 42, totalPages: 5 });
     assert.equal(result.products.length, 1);
     assert.equal(result.products[0].productCode, "FPD0021");
+    assert.equal(result.products[0].status, "UNVERIFIED");
     assert.equal(result.products[0].totalVerifications, 0);
 });

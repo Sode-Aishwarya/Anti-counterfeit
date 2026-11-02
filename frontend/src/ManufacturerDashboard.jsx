@@ -1098,7 +1098,7 @@ useEffect(() => {
                   <td>
 
                     <span className="status registered">
-                      {product.status === "REGISTERED" ? "Registered" : "—"}
+                      {product.status === "REGISTERED" ? "Verified on chain" : product.status || "UNVERIFIED"}
                     </span>
 
                   </td>
@@ -1894,7 +1894,7 @@ const registerPage = (
 
                         <td>
                           <span className="status registered">
-                            {product.status === "REGISTERED" ? "Registered" : "—"}
+                            {product.status === "REGISTERED" ? "Verified on chain" : product.status || "UNVERIFIED"}
                           </span>
                         </td>
 
